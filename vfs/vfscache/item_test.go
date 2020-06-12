@@ -317,7 +317,11 @@ func TestItemReload(t *testing.T) {
 	assert.Equal(t, 14, n)
 	assert.True(t, item.IsDirty())
 
-	// But DO NOT close it to simulate a cache restart
+	// Close the file to pacify Windows, but don't call item.Close()
+	item.mu.Lock()
+	require.NoError(t, item.fd.Close())
+	item.fd = nil
+	item.mu.Unlock()
 
 	// Remove the item from the cache
 	c.mu.Lock()
