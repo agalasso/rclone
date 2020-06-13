@@ -736,6 +736,13 @@ func (item *Item) _present() bool {
 	return item.info.Rs.Present(ranges.Range{Pos: 0, Size: item.info.Size})
 }
 
+// present returns true if the whole file has been downloaded
+func (item *Item) present() bool {
+	item.mu.Lock()
+	defer item.mu.Unlock()
+	return item._present()
+}
+
 // hasRange returns true if the current ranges entirely include range
 func (item *Item) hasRange(r ranges.Range) bool {
 	item.mu.Lock()

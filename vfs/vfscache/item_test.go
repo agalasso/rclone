@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fstest"
 	"github.com/rclone/rclone/lib/random"
+	"github.com/rclone/rclone/lib/readers"
 	"github.com/rclone/rclone/vfs/vfscommon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -439,4 +441,120 @@ func TestItemReloadCacheStale(t *testing.T) {
 	// object is correct
 
 	checkObject(t, r, "existing", "HELLO"+contents2[5:])
+}
+
+func TestItemReadWrite(t *testing.T) {
+	r, c, cleanup := newItemTestCache(t)
+	defer cleanup()
+	const (
+		size     = 50*1024*1024 + 123
+		fileName = "large"
+	)
+
+	item, _ := c.get(fileName)
+	require.NoError(t, item.Open(nil))
+
+	// Create the test file
+	in := readers.NewPatternReader(size)
+	buf := make([]byte, 1024*1024)
+	buf2 := make([]byte, 1024*1024)
+	offset := int64(0)
+	for {
+		n, err := in.Read(buf)
+		n2, err2 := item.WriteAt(buf[:n], offset)
+		offset += int64(n2)
+		require.NoError(t, err2)
+		require.Equal(t, n, n2)
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+	}
+
+	// Check it is the right size
+	readSize, err := item.GetSize()
+	require.NoError(t, err)
+	assert.Equal(t, int64(size), readSize)
+
+	require.NoError(t, item.Close(nil))
+
+	assert.False(t, item.remove(fileName))
+
+	obj, err := r.Fremote.NewObject(context.Background(), fileName)
+	require.NoError(t, err)
+	assert.Equal(t, int64(size), obj.Size())
+
+	// read and check a block of size N at offset
+	// It returns eof true if the end of file has been reached
+	readCheck := func(t *testing.T, item *Item, offset int64, N int) (n int, eof bool) {
+		n, err := item.ReadAt(buf, offset)
+
+		_, err2 := in.Seek(offset, io.SeekStart)
+		require.NoError(t, err2)
+		n2, err2 := in.Read(buf2[:n])
+		require.Equal(t, n, n2)
+		assert.Equal(t, buf[:n], buf2[:n2])
+
+		if err == io.EOF {
+			return n, true
+		}
+		require.NoError(t, err)
+		require.NoError(t, err2)
+		return n, false
+	}
+
+	// Read it back sequentially
+	t.Run("Sequential", func(t *testing.T) {
+		require.NoError(t, item.Open(obj))
+		assert.False(t, item.present())
+		offset := int64(0)
+		for {
+			n, eof := readCheck(t, item, offset, len(buf))
+			offset += int64(n)
+			if eof {
+				break
+			}
+		}
+		assert.Equal(t, int64(size), offset)
+		require.NoError(t, item.Close(nil))
+		assert.False(t, item.remove(fileName))
+	})
+
+	// Read it back randomly
+	t.Run("Random", func(t *testing.T) {
+		require.NoError(t, item.Open(obj))
+		assert.False(t, item.present())
+		for !item.present() {
+			blockSize := rand.Intn(len(buf))
+			offset := rand.Int63n(size+2*int64(blockSize)) - int64(blockSize)
+			if offset < 0 {
+				offset = 0
+			}
+			_, _ = readCheck(t, item, offset, blockSize)
+		}
+		require.NoError(t, item.Close(nil))
+		assert.False(t, item.remove(fileName))
+	})
+
+	// Read it back in reverse which creates the maximum number of
+	// downloaders
+	t.Run("Reverse", func(t *testing.T) {
+		require.NoError(t, item.Open(obj))
+		assert.False(t, item.present())
+		offset := int64(size)
+		for {
+			blockSize := len(buf)
+			offset -= int64(blockSize)
+			if offset < 0 {
+				offset = 0
+				blockSize += int(offset)
+			}
+			_, _ = readCheck(t, item, offset, blockSize)
+			if offset == 0 {
+				break
+			}
+		}
+		require.NoError(t, item.Close(nil))
+		assert.False(t, item.remove(fileName))
+	})
 }
